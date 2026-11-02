@@ -2,6 +2,11 @@
 import pytest
 from datetime import date
 
+from datetime import date, timedelta
+
+import pytest
+
+from app import store
 
 def test_created_book_is_saved_and_retrievable(client):
     payload = {
@@ -336,3 +341,410 @@ def test_unknown_member_id_preserves_existing_records(client, method):
     list_response = client.get("/members")
     assert list_response.status_code == 200
     assert list_response.get_json() == [existing_member]
+    
+    
+    
+@pytest.fixture
+def lending_records(client):
+    book_response = client.post("/books", json={
+        "title": "Loan Test Book",
+        "author": "Test Author",
+        "isbn": "9780132350884",
+        "total_copies": 1,
+    })
+    first_member_response = client.post("/members", json={
+        "name": "Alex Carter",
+        "email": "alex.carter@example.com",
+    })
+    second_member_response = client.post("/members", json={
+        "name": "Jamie Chen",
+        "email": "jamie.chen@example.com",
+    })
+
+    assert book_response.status_code == 201
+    assert first_member_response.status_code == 201
+    assert second_member_response.status_code == 201
+
+    return {
+        "book": book_response.get_json(),
+        "member": first_member_response.get_json(),
+        "other_member": second_member_response.get_json(),
+    }
+    
+    
+    
+    
+def test_checkout_records_loan_and_updates_availability(client, lending_records):
+    book = lending_records["book"]
+    member = lending_records["member"]
+
+    response = client.post("/loans", json={
+        "book_id": book["id"],
+        "member_id": member["id"],
+    })
+
+    assert response.status_code == 201
+    loan = response.get_json()
+    assert loan["book_id"] == book["id"]
+    assert loan["member_id"] == member["id"]
+    assert loan["return_date"] is None
+
+    loan_date = date.fromisoformat(loan["loan_date"])
+    due_date = date.fromisoformat(loan["due_date"])
+    assert due_date > loan_date
+
+    book_response = client.get(f"/books/{book['id']}")
+    assert book_response.status_code == 200
+
+    expected_book = book.copy()
+    expected_book["available_copies"] = 0
+    assert book_response.get_json() == expected_book
+
+    loans_response = client.get("/loans")
+    assert loans_response.status_code == 200
+    assert loans_response.get_json() == [loan]
+
+
+
+def test_checkout_without_available_copies_is_rejected(client, lending_records):
+    book = lending_records["book"]
+    first_member = lending_records["member"]
+    second_member = lending_records["other_member"]
+
+    first_response = client.post("/loans", json={
+        "book_id": book["id"],
+        "member_id": first_member["id"],
+    })
+    assert first_response.status_code == 201
+    first_loan = first_response.get_json()
+
+    before_response = client.get(f"/books/{book['id']}")
+    assert before_response.status_code == 200
+    book_before = before_response.get_json()
+    assert book_before["available_copies"] == 0
+
+    second_response = client.post("/loans", json={
+        "book_id": book["id"],
+        "member_id": second_member["id"],
+    })
+
+    after_response = client.get(f"/books/{book['id']}")
+    loans_response = client.get("/loans")
+
+    assert after_response.status_code == 200
+    assert loans_response.status_code == 200
+    assert after_response.get_json() == book_before
+    assert loans_response.get_json() == [first_loan]
+    assert second_response.status_code in (400, 409)
+    
+    
+
+def test_return_restores_book_and_records_date(client, lending_records):
+    book = lending_records["book"]
+    member = lending_records["member"]
+
+    checkout_response = client.post("/loans", json={
+        "book_id": book["id"],
+        "member_id": member["id"],
+    })
+    assert checkout_response.status_code == 201
+    loan = checkout_response.get_json()
+
+    date_before = date.today()
+    return_response = client.put(f"/loans/{loan['id']}/return")
+    date_after = date.today()
+
+    assert return_response.status_code == 200
+    returned = return_response.get_json()
+
+    return_date = date.fromisoformat(returned["return_date"])
+    assert date_before <= return_date <= date_after
+
+    expected_loan = loan.copy()
+    expected_loan["return_date"] = returned["return_date"]
+    assert returned == expected_loan
+
+    book_response = client.get(f"/books/{book['id']}")
+    assert book_response.status_code == 200
+    assert book_response.get_json() == book
+
+    loans_response = client.get("/loans")
+    assert loans_response.status_code == 200
+    assert loans_response.get_json() == [returned]
+ 
+ 
+def test_repeated_return_preserves_book_and_loan(client, lending_records):
+    book = lending_records["book"]
+    member = lending_records["member"]
+
+    checkout_response = client.post("/loans", json={
+        "book_id": book["id"],
+        "member_id": member["id"],
+    })
+    assert checkout_response.status_code == 201
+    loan = checkout_response.get_json()
+
+    first_return = client.put(f"/loans/{loan['id']}/return")
+    assert first_return.status_code == 200
+    returned_loan = first_return.get_json()
+
+    before_response = client.get(f"/books/{book['id']}")
+    assert before_response.status_code == 200
+    assert before_response.get_json() == book
+
+    second_return = client.put(f"/loans/{loan['id']}/return")
+
+    assert second_return.status_code == 400
+    assert second_return.get_json() == {"error": "Loan already returned"}
+
+    after_response = client.get(f"/books/{book['id']}")
+    assert after_response.status_code == 200
+    assert after_response.get_json() == book
+
+    loans_response = client.get("/loans")
+    assert loans_response.status_code == 200
+    assert loans_response.get_json() == [returned_loan]  
+    
+    
+
+
+
+@pytest.mark.parametrize("filter_name", ["book_id", "member_id"])
+def test_loan_filters_return_matching_records(client, lending_records, filter_name):
+    first_book = lending_records["book"]
+    first_member = lending_records["member"]
+    second_member = lending_records["other_member"]
+
+    book_response = client.post("/books", json={
+        "title": "Second Loan Book",
+        "author": "Another Author",
+        "isbn": "9780134685991",
+        "total_copies": 1,
+    })
+    assert book_response.status_code == 201
+    second_book = book_response.get_json()
+
+    first_response = client.post("/loans", json={
+        "book_id": first_book["id"],
+        "member_id": second_member["id"],
+    })
+    second_response = client.post("/loans", json={
+        "book_id": second_book["id"],
+        "member_id": first_member["id"],
+    })
+
+    assert first_response.status_code == 201
+    assert second_response.status_code == 201
+    first_loan = first_response.get_json()
+
+    response = client.get(
+        "/loans",
+        query_string={filter_name: first_loan[filter_name]},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == [first_loan] 
+    
+def test_renewal_updates_only_due_date(client, lending_records):
+    book = lending_records["book"]
+    member = lending_records["member"]
+
+    checkout_response = client.post("/loans", json={
+        "book_id": book["id"],
+        "member_id": member["id"],
+    })
+    assert checkout_response.status_code == 201
+    loan = checkout_response.get_json()
+    original_due_date = date.fromisoformat(loan["due_date"])
+
+    renewal_response = client.put(f"/loans/{loan['id']}/renew")
+
+    assert renewal_response.status_code == 200
+    renewed = renewal_response.get_json()
+    new_due_date = date.fromisoformat(renewed["due_date"])
+    assert new_due_date > original_due_date
+
+    expected_loan = loan.copy()
+    expected_loan["due_date"] = renewed["due_date"]
+    assert renewed == expected_loan
+
+    loans_response = client.get(
+        "/loans", query_string={"book_id": book["id"]}
+    )
+    assert loans_response.status_code == 200
+    assert loans_response.get_json() == [renewed]
+
+    book_response = client.get(f"/books/{book['id']}")
+    assert book_response.status_code == 200
+    expected_book = book.copy()
+    expected_book["available_copies"] = 0
+    assert book_response.get_json() == expected_book
+    
+    
+    
+def test_another_members_hold_blocks_renewal(client, lending_records):
+    book = lending_records["book"]
+    borrower = lending_records["member"]
+    waiting_member = lending_records["other_member"]
+
+    checkout_response = client.post("/loans", json={
+        "book_id": book["id"],
+        "member_id": borrower["id"],
+    })
+    assert checkout_response.status_code == 201
+    loan = checkout_response.get_json()
+
+    reservation_response = client.post("/reservations", json={
+        "book_id": book["id"],
+        "member_id": waiting_member["id"],
+    })
+    assert reservation_response.status_code == 201
+    reservation = reservation_response.get_json()
+    assert reservation["fulfilled"] is False
+
+    renewal_response = client.put(f"/loans/{loan['id']}/renew")
+
+    loans_response = client.get(
+        "/loans", query_string={"book_id": book["id"]}
+    )
+    reservations_response = client.get(
+        "/reservations", query_string={"book_id": book["id"]}
+    )
+
+    assert loans_response.status_code == 200
+    assert reservations_response.status_code == 200
+    assert reservations_response.get_json() == [reservation]
+    assert loans_response.get_json() == [loan]
+    assert renewal_response.status_code in (400, 409)
+    
+    
+    
+def test_returned_loan_cannot_be_renewed(client, lending_records):
+    book = lending_records["book"]
+    member = lending_records["member"]
+
+    checkout_response = client.post("/loans", json={
+        "book_id": book["id"],
+        "member_id": member["id"],
+    })
+    assert checkout_response.status_code == 201
+    loan = checkout_response.get_json()
+
+    return_response = client.put(f"/loans/{loan['id']}/return")
+    assert return_response.status_code == 200
+    returned_loan = return_response.get_json()
+
+    renewal_response = client.put(f"/loans/{loan['id']}/renew")
+
+    assert renewal_response.status_code == 400
+    assert renewal_response.get_json() == {"error": "Loan already returned"}
+
+    loans_response = client.get(
+        "/loans", query_string={"book_id": book["id"]}
+    )
+    assert loans_response.status_code == 200
+    assert loans_response.get_json() == [returned_loan]
+
+    book_response = client.get(f"/books/{book['id']}")
+    assert book_response.status_code == 200
+    assert book_response.get_json() == book
+    
+    
+    
+@pytest.mark.parametrize(
+    "method, operation",
+    [("PUT", "return"), ("PUT", "renew"), ("GET", "fine")],
+)
+def test_unknown_loan_id_preserves_records(client, lending_records, method, operation):
+    book = lending_records["book"]
+    member = lending_records["member"]
+
+    checkout_response = client.post("/loans", json={
+        "book_id": book["id"],
+        "member_id": member["id"],
+    })
+    assert checkout_response.status_code == 201
+    loan = checkout_response.get_json()
+    unknown_id = loan["id"] + 1000
+
+    response = client.open(
+        f"/loans/{unknown_id}/{operation}", method=method
+    )
+
+    assert response.status_code == 404
+    assert response.get_json() == {"error": "Loan not found"}
+
+    loans_response = client.get("/loans")
+    assert loans_response.status_code == 200
+    assert loans_response.get_json() == [loan]
+
+    book_response = client.get(f"/books/{book['id']}")
+    assert book_response.status_code == 200
+    expected_book = book.copy()
+    expected_book["available_copies"] = 0
+    assert book_response.get_json() == expected_book
+    
+    
+@pytest.fixture
+def fine_reference_day(monkeypatch):
+    reference_day = date.today()
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return reference_day
+
+    monkeypatch.setattr("app.routes.loans.date", FixedDate)
+    return reference_day
+
+
+@pytest.mark.parametrize(
+    "due_offset, return_offset, expected_fine",
+    [
+        (3, None, 0.0),
+        (0, None, 0.0),
+        (-3, None, 0.75),
+        (-3, -4, 0.0),
+        (-3, -2, 0.25),
+    ],
+    ids=[
+        "not_due",
+        "due_today",
+        "active_three_days_overdue",
+        "returned_before_due",
+        "returned_one_day_late",
+    ],
+)
+def test_fine_uses_due_and_return_dates(
+    client, lending_records, fine_reference_day,
+    due_offset, return_offset, expected_fine,
+):
+    book = lending_records["book"]
+    member = lending_records["member"]
+
+    checkout_response = client.post("/loans", json={
+        "book_id": book["id"],
+        "member_id": member["id"],
+    })
+    assert checkout_response.status_code == 201
+    loan_id = checkout_response.get_json()["id"]
+
+    stored_loan = store.loans[loan_id]
+    stored_loan.due_date = fine_reference_day + timedelta(days=due_offset)
+    stored_loan.loan_date = stored_loan.due_date - timedelta(days=14)
+
+    if return_offset is not None:
+        return_response = client.put(f"/loans/{loan_id}/return")
+        assert return_response.status_code == 200
+        stored_loan.return_date = (
+            fine_reference_day + timedelta(days=return_offset)
+        )
+
+    loan_before = stored_loan.to_dict()
+    fine_response = client.get(f"/loans/{loan_id}/fine")
+
+    assert fine_response.status_code == 200
+    result = fine_response.get_json()
+    assert result["loan_id"] == loan_id
+    assert result["fine_amount"] == pytest.approx(expected_fine)
+    assert stored_loan.to_dict() == loan_before
