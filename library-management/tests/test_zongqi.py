@@ -748,3 +748,182 @@ def test_fine_uses_due_and_return_dates(
     assert result["loan_id"] == loan_id
     assert result["fine_amount"] == pytest.approx(expected_fine)
     assert stored_loan.to_dict() == loan_before
+    
+    
+def test_created_reservation_is_saved_and_retrievable(client, lending_records):
+    book = lending_records["book"]
+    borrower = lending_records["member"]
+    waiting_member = lending_records["other_member"]
+
+    checkout_response = client.post("/loans", json={
+        "book_id": book["id"],
+        "member_id": borrower["id"],
+    })
+    assert checkout_response.status_code == 201
+
+    date_before = date.today()
+    create_response = client.post("/reservations", json={
+        "book_id": book["id"],
+        "member_id": waiting_member["id"],
+    })
+    date_after = date.today()
+
+    assert create_response.status_code == 201
+    reservation = create_response.get_json()
+    assert reservation["book_id"] == book["id"]
+    assert reservation["member_id"] == waiting_member["id"]
+    assert reservation["fulfilled"] is False
+
+    reservation_date = date.fromisoformat(reservation["reservation_date"])
+    assert date_before <= reservation_date <= date_after
+
+    list_response = client.get("/reservations")
+    assert list_response.status_code == 200
+    assert list_response.get_json() == [reservation]
+
+    book_response = client.get(f"/books/{book['id']}")
+    assert book_response.status_code == 200
+    expected_book = book.copy()
+    expected_book["available_copies"] = 0
+    assert book_response.get_json() == expected_book   
+
+
+@pytest.fixture
+def reservation_records(client, lending_records):
+    first_book = lending_records["book"]
+    first_member = lending_records["member"]
+    second_member = lending_records["other_member"]
+
+    book_response = client.post("/books", json={
+        "title": "Second Reserved Book",
+        "author": "Another Author",
+        "isbn": "9780134685991",
+        "total_copies": 1,
+    })
+    assert book_response.status_code == 201
+    second_book = book_response.get_json()
+
+    first_checkout = client.post("/loans", json={
+        "book_id": first_book["id"],
+        "member_id": first_member["id"],
+    })
+    second_checkout = client.post("/loans", json={
+        "book_id": second_book["id"],
+        "member_id": second_member["id"],
+    })
+    assert first_checkout.status_code == 201
+    assert second_checkout.status_code == 201
+
+    first_response = client.post("/reservations", json={
+        "book_id": first_book["id"],
+        "member_id": second_member["id"],
+    })
+    second_response = client.post("/reservations", json={
+        "book_id": second_book["id"],
+        "member_id": first_member["id"],
+    })
+    assert first_response.status_code == 201
+    assert second_response.status_code == 201
+
+    return {
+        "first": first_response.get_json(),
+        "second": second_response.get_json(),
+    }
+
+
+def test_list_reservations_returns_all_records(client, reservation_records):
+    response = client.get("/reservations")
+
+    assert response.status_code == 200
+    reservations = response.get_json()
+    assert len(reservations) == 2
+
+    actual_by_id = {
+        reservation["id"]: reservation
+        for reservation in reservations
+    }
+    expected_by_id = {
+        reservation["id"]: reservation
+        for reservation in reservation_records.values()
+    }
+    assert actual_by_id == expected_by_id
+    
+    
+    
+@pytest.mark.parametrize(
+    "filter_case, should_match",
+    [
+        ("book", True),
+        ("member", True),
+        ("both", True),
+        ("missing_book", False),
+        ("missing_member", False),
+        ("nonmatching_pair", False),
+    ],
+)
+def test_reservation_filters_return_matching_records(
+    client, reservation_records, filter_case, should_match,
+):
+    first = reservation_records["first"]
+    second = reservation_records["second"]
+
+    queries = {
+        "book": {"book_id": first["book_id"]},
+        "member": {"member_id": first["member_id"]},
+        "both": {
+            "book_id": first["book_id"],
+            "member_id": first["member_id"],
+        },
+        "missing_book": {"book_id": first["book_id"] + 1000},
+        "missing_member": {"member_id": first["member_id"] + 1000},
+        "nonmatching_pair": {
+            "book_id": first["book_id"],
+            "member_id": second["member_id"],
+        },
+    }
+
+    response = client.get(
+        "/reservations", query_string=queries[filter_case]
+    )
+
+    assert response.status_code == 200
+    expected = [first] if should_match else []
+    assert response.get_json() == expected
+    
+    
+@pytest.mark.parametrize(
+    "missing_field, error_message",
+    [
+        ("book_id", "Book not found"),
+        ("member_id", "Member not found"),
+    ],
+)
+def test_reservation_with_unknown_reference_preserves_records(
+    client, reservation_records, missing_field, error_message,
+):
+    first = reservation_records["first"]
+    payload = {
+        "book_id": first["book_id"],
+        "member_id": first["member_id"],
+    }
+    payload[missing_field] += 1000
+
+    response = client.post("/reservations", json=payload)
+
+    assert response.status_code == 404
+    assert response.get_json() == {"error": error_message}
+
+    list_response = client.get("/reservations")
+    assert list_response.status_code == 200
+    reservations = list_response.get_json()
+    assert len(reservations) == 2
+
+    actual_by_id = {
+        reservation["id"]: reservation
+        for reservation in reservations
+    }
+    expected_by_id = {
+        reservation["id"]: reservation
+        for reservation in reservation_records.values()
+    }
+    assert actual_by_id == expected_by_id
