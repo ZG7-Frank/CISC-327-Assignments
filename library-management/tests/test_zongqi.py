@@ -927,3 +927,83 @@ def test_reservation_with_unknown_reference_preserves_records(
         for reservation in reservation_records.values()
     }
     assert actual_by_id == expected_by_id
+    
+    
+def test_ui_checkout_blocks_over_lending(client, lending_records):
+    book = lending_records["book"]
+    borrower = lending_records["member"]
+    other_member = lending_records["other_member"]
+
+    first_response = client.post("/ui/loans", data={
+        "book_id": book["id"],
+        "member_id": borrower["id"],
+    })
+    assert first_response.status_code == 302
+
+    loans_before = client.get("/loans")
+    assert loans_before.status_code == 200
+    existing_loans = loans_before.get_json()
+    assert len(existing_loans) == 1
+    assert existing_loans[0]["book_id"] == book["id"]
+    assert existing_loans[0]["member_id"] == borrower["id"]
+    assert existing_loans[0]["return_date"] is None
+
+    expected_book = book.copy()
+    expected_book["available_copies"] = 0
+
+    book_before = client.get(f"/books/{book['id']}")
+    assert book_before.status_code == 200
+    assert book_before.get_json() == expected_book
+
+    second_response = client.post("/ui/loans", data={
+        "book_id": book["id"],
+        "member_id": other_member["id"],
+    })
+
+    assert second_response.status_code == 400
+    assert "No copies available" in second_response.get_data(as_text=True)
+
+    book_after = client.get(f"/books/{book['id']}")
+    assert book_after.status_code == 200
+    assert book_after.get_json() == expected_book
+
+    loans_after = client.get("/loans")
+    assert loans_after.status_code == 200
+    assert loans_after.get_json() == existing_loans
+
+
+
+def test_checkout_with_initial_zero_stock_is_rejected(client):
+    book_response = client.post("/books", json={
+        "title": "Zero Stock Book",
+        "author": "Test Author",
+        "isbn": "9780132350884",
+        "total_copies": 0,
+    })
+    member_response = client.post("/members", json={
+        "name": "Zero Stock Member",
+        "email": "zero.stock@example.com",
+    })
+
+    assert book_response.status_code == 201
+    assert member_response.status_code == 201
+    book = book_response.get_json()
+    member = member_response.get_json()
+    assert book["total_copies"] == 0
+    assert book["available_copies"] == 0
+
+    response = client.post("/loans", json={
+        "book_id": book["id"],
+        "member_id": member["id"],
+    })
+
+    assert response.status_code == 400
+    assert response.get_json() == {"error": "No copies available"}
+
+    book_after = client.get(f"/books/{book['id']}")
+    assert book_after.status_code == 200
+    assert book_after.get_json() == book
+
+    loans_after = client.get("/loans")
+    assert loans_after.status_code == 200
+    assert loans_after.get_json() == []
