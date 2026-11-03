@@ -51,12 +51,19 @@ app working without a REST client, and calls the same in-memory store.
 | GET | `/members/<id>` | Get one member |
 | PUT | `/members/<id>` | Update a member |
 | DELETE | `/members/<id>` | Delete a member |
-| POST | `/loans` | Check out a book (`book_id`, `member_id`) |
+| POST | `/loans` | Check out a book (`book_id`, `member_id`); returns 400 when no copies are available |
 | PUT | `/loans/<id>/return` | Return a loaned book |
 | GET | `/loans?member_id=&book_id=` | Look up loans |
+
+
+### Checkout availability
+
+Both `POST /loans` and the checkout form at `/ui/loans` require at least one available copy. When `available_copies <= 0`, checkout returns HTTP 400, creates no loan, and leaves book availability unchanged.
+
+The JSON API returns `{"error": "No copies available"}`. The web form displays `No copies available`. Successful API checkouts return HTTP 201, and successful form checkouts redirect to the Loans page.
 
 ## Tests
 
 ```bash
-pytest
+python -m pytest
 ```

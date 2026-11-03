@@ -62,6 +62,9 @@ def loans_page():
         member_id = int(request.form["member_id"])
         book = store.books.get(book_id)
         if book is not None:
+            if book.available_copies <= 0:
+                return "No copies available", 400
+
             book.available_copies -= 1
             loan_id = store.next_id("loan")
             loan = Loan(
@@ -84,3 +87,6 @@ def return_loan_page(loan_id):
         if book is not None:
             book.available_copies += 1
     return redirect(url_for("views.loans_page"))
+
+
+
