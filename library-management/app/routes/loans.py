@@ -16,7 +16,7 @@ def list_loans():
     member_id = request.args.get("member_id", type=int)
     book_id = request.args.get("book_id", type=int)
     if member_id is not None:
-        results = [l for l in results if l.book_id == member_id]
+        results = [l for l in results if l.member_id == member_id]
     if book_id is not None:
         results = [l for l in results if l.book_id == book_id]
     return jsonify([l.to_dict() for l in results])
