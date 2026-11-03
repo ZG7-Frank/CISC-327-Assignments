@@ -56,6 +56,16 @@ app working without a REST client, and calls the same in-memory store.
 | GET | `/loans?member_id=&book_id=` | Look up loans |
 
 
+### Loan filtering
+
+Use `GET /loans?member_id=2` to retrieve loans belonging to member 2, or `GET /loans?book_id=3` to retrieve loans for book 3.
+
+When both parameters are supplied, a loan must match both values. A lookup with no matching loans returns HTTP 200 with `[]`. Results include both active and returned loans.
+
+These filters use internal member IDs. They do not provide library-card authentication or access control.
+
+
+
 ### Checkout availability
 
 Both `POST /loans` and the checkout form at `/ui/loans` require at least one available copy. When `available_copies <= 0`, checkout returns HTTP 400, creates no loan, and leaves book availability unchanged.

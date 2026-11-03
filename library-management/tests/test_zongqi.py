@@ -1007,3 +1007,74 @@ def test_checkout_with_initial_zero_stock_is_rejected(client):
     loans_after = client.get("/loans")
     assert loans_after.status_code == 200
     assert loans_after.get_json() == []
+
+
+def test_member_without_loans_gets_empty_list(client, lending_records):
+    book = lending_records["book"]
+    member_without_loans = lending_records["member"]
+    borrower = lending_records["other_member"]
+
+    # Deliberately match the book ID and the non-borrowing member's ID.
+    assert book["id"] == member_without_loans["id"]
+    assert borrower["id"] != member_without_loans["id"]
+
+    checkout_response = client.post("/loans", json={
+        "book_id": book["id"],
+        "member_id": borrower["id"],
+    })
+    assert checkout_response.status_code == 201
+    loan = checkout_response.get_json()
+
+    response = client.get(
+        "/loans",
+        query_string={"member_id": member_without_loans["id"]},
+    )
+    assert response.status_code == 200
+    assert response.get_json() == []
+
+    # The lookup must leave the other member's loan unchanged.
+    all_loans_response = client.get("/loans")
+    assert all_loans_response.status_code == 200
+    assert all_loans_response.get_json() == [loan]
+    
+    
+    
+def test_combined_loan_filters_require_both_matches(client, lending_records):
+    first_book = lending_records["book"]
+    first_member = lending_records["member"]
+    second_member = lending_records["other_member"]
+
+    book_response = client.post("/books", json={
+        "title": "Combined Filter Book",
+        "author": "Test Author",
+        "isbn": "9780134685991",
+        "total_copies": 1,
+    })
+    assert book_response.status_code == 201
+    second_book = book_response.get_json()
+
+    first_checkout = client.post("/loans", json={
+        "book_id": first_book["id"],
+        "member_id": second_member["id"],
+    })
+    second_checkout = client.post("/loans", json={
+        "book_id": second_book["id"],
+        "member_id": first_member["id"],
+    })
+    assert first_checkout.status_code == 201
+    assert second_checkout.status_code == 201
+    second_loan = second_checkout.get_json()
+
+    matching_response = client.get("/loans", query_string={
+        "book_id": second_book["id"],
+        "member_id": first_member["id"],
+    })
+    assert matching_response.status_code == 200
+    assert matching_response.get_json() == [second_loan]
+
+    nonmatching_response = client.get("/loans", query_string={
+        "book_id": first_book["id"],
+        "member_id": first_member["id"],
+    })
+    assert nonmatching_response.status_code == 200
+    assert nonmatching_response.get_json() == []
