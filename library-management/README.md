@@ -54,7 +54,9 @@ app working without a REST client, and calls the same in-memory store.
 | POST | `/loans` | Check out a book (`book_id`, `member_id`); returns 400 when no copies are available |
 | PUT | `/loans/<id>/return` | Return a loaned book |
 | GET | `/loans?member_id=&book_id=` | Look up loans |
+| POST | `/loans/<id>/reminder` | Request a simulated reminder for an active loan due in 1–3 days. Returns `loan_id` and `notified`. |
 
+If the simulator reports a failed send, the endpoint returns "notified": false and leaves the loan unchanged.
 
 ### Loan filtering
 

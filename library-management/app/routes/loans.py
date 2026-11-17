@@ -1,6 +1,7 @@
 from datetime import date, timedelta
 
 from flask import Blueprint, jsonify, request
+from notification_service import DUE_DATE_REMINDER_SUBJECT, send_notification
 
 from app import store
 from app.models.loan import Loan, LOAN_PERIOD_DAYS
@@ -70,6 +71,27 @@ def renew_loan(loan_id):
 
     loan.due_date = loan.due_date + timedelta(days=LOAN_PERIOD_DAYS)
     return jsonify(loan.to_dict())
+
+@loans_bp.route("/<int:loan_id>/reminder", methods=["POST"])
+def send_due_date_reminder(loan_id):
+    loan = store.loans.get(loan_id)
+    if loan is None:
+        return jsonify({"error": "Loan not found"}), 404
+
+    if loan.return_date is not None:
+        return jsonify({"error": "Loan already returned"}), 400
+
+    days_until_due = (loan.due_date - date.today()).days
+    if not 1 <= days_until_due <= 3:
+        return jsonify({"error": "Loan must be due in 1 to 3 days"}), 400
+
+    member = store.members.get(loan.member_id)
+    if member is None:
+        return jsonify({"error": "Member not found"}), 404
+
+    message = f"Your library loan #{loan_id} is due on {loan.due_date.isoformat()}."
+    sent = send_notification(member.email, DUE_DATE_REMINDER_SUBJECT, message)
+    return jsonify({"loan_id": loan_id, "notified": sent})
 
 
 @loans_bp.route("/<int:loan_id>/fine", methods=["GET"])
